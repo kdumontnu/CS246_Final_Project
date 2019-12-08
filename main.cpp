@@ -5,6 +5,7 @@
 #include "pin.H"
 #include <set>
 #include <map> 
+#include <cmath>
 
 //Disable any instrumentation and dump all the instructions in the test program that we care about
 // ie. instuctions that write to a register.  
@@ -17,6 +18,7 @@ using std::cout;
 using std::cerr;;
 using std::string;
 using std::endl;
+using std::pow;
 std::ostream * out = &cerr;
 #define X_IN_Y(x,y) (y.find(x) != y.end())
 #define FOR_X_IN_Y(x,y) for (auto x = y.begin(); x != y.end(); x++) 
@@ -34,7 +36,6 @@ enum INST_CAT {
   I_PURE_ARITH,
   I_ARITH_1OP,
   I_ARITH_2OP,
-  I_ARITH_3OP,
   I_REG_MOV,
   F_PURE_LOAD,
   F_LOAD_ARITH,
@@ -49,7 +50,6 @@ std::string INST_CAT_s[] = {
   "I_PURE_ARITH",
   "I_ARITH_1OP",
   "I_ARITH_2OP",
-  "I_ARITH_3OP",
   "I_REG_MOV",
   "F_PURE_LOAD",
   "F_LOAD_ARITH",
@@ -74,6 +74,9 @@ KNOB<UINT64> KnobLimit(KNOB_MODE_WRITEONCE,        "pintool",
 
 KNOB<string> KnobInstCat(KNOB_MODE_WRITEONCE,         "pintool",
                             "inst_cat", "ALL", "What category of instructions?");
+
+KNOB<UINT64> KnobTableSize(KNOB_MODE_WRITEONCE,        "pintool",
+                            "size", "8", "Size of Value Prediction table in bits. Total length = 2**size");     
                             
 // KNOB<UINT64> KnobTableSize(KNOB_MODE_WRITEONCE,        "pintool",
 //                             "size", "8", "Size of array entries");                             
@@ -84,6 +87,12 @@ std::string rt_name[] = {"", "Float Reg", "8 Bit Int", "16 Bit Int", "32 Bit Int
 std::set<REG> allreg;
 std::map<REG, RT> regtype;
 
+/* ===================================================================== */
+/* Value Prediction Unit                                                 */
+/* ===================================================================== */
+UINT8 VPT_BITS = KnobTableSize.Value(); // Number of bits to use as VPT address
+UINT8 VPT_MASK = VPT_BITS - 1;          // Mask for VPT address table
+UINT32 VPT_ENTREIS = pow(2, VPT_BITS);  // Length of VPT table
 
 UINT8 ZEROBUF[] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
@@ -309,8 +318,9 @@ VOID PrintResults(bool limit_reached)
         out << "Reason: fini\n";
     out << "Output:" << endl;
 
+    out << "OPERATION" << "|" << "SUCCESS COUNT" << "|" << "TOTAL_COUNT" << endl;
     for(short i = 0; i < CATEGORIES; i++) {
-      out << INST_CAT_s[i] << ": " << success_per_category[i] << "/" << hit_per_category[i] << endl;
+      out << INST_CAT_s[i] << "|" << success_per_category[i] << "|" << hit_per_category[i] << endl;
     }
 
 }
@@ -351,15 +361,13 @@ INST_CAT set_instr_cat(INS ins, REG write_reg){
     return I_ARITH_1OP;
   } else if(!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)) && INS_MaxNumRRegs(ins) == 2) {
     return I_ARITH_2OP;
-  } else if(!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)) && INS_MaxNumRRegs(ins) == 3) {
-    return I_ARITH_3OP;
   } else if(!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER) {
     return I_REG_MOV;
   } else if(INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER) {
     return F_PURE_LOAD;
   } else if(INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && IS_ARITHMETIC(INS_Category(ins))) {
     return F_LOAD_ARITH;
-  } else if(!INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins))) {
+  } else if(!INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && IS_ARITHMETIC(INS_Category(ins))) {
     return F_PURE_ARITH;
   } else if(!INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER) {
     return F_REG_MOVE;
