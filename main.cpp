@@ -26,6 +26,38 @@ std::ostream * out = &cerr;
                             || t == XED_CATEGORY_MISC  || t ==  XED_CATEGORY_SETCC || t == XED_CATEGORY_SHIFT \
                             || t == XED_CATEGORY_SSE || t == XED_CATEGORY_X87_ALU )
 
+// Category for instruction
+enum INST_CAT {
+  UNKNOWN,
+  I_PURE_LOAD,
+  I_LOAD_ARITH,
+  I_PURE_ARITH,
+  I_ARITH_1OP,
+  I_ARITH_2OP,
+  I_ARITH_3OP,
+  I_REG_MOV,
+  F_PURE_LOAD,
+  F_LOAD_ARITH,
+  F_PURE_ARITH,
+  F_REG_MOVE,
+};
+
+std::string INST_CAT_s[] = {
+  "UNKNOWN",
+  "I_PURE_LOAD",
+  "I_LOAD_ARITH",
+  "I_PURE_ARITH",
+  "I_ARITH_1OP",
+  "I_ARITH_2OP",
+  "I_ARITH_3OP",
+  "I_REG_MOV",
+  "F_PURE_LOAD",
+  "F_LOAD_ARITH",
+  "F_PURE_ARITH",
+  "F_REG_MOVE"
+};
+
+UINT8 CATEGORIES = sizeof(INST_CAT_s)/sizeof(INST_CAT_s[0]);
 
 /* ===================================================================== */
 /* Commandline Switches */
@@ -41,7 +73,7 @@ KNOB<UINT64> KnobLimit(KNOB_MODE_WRITEONCE,        "pintool",
                             "inst_limit", "1000000000", "Quit after executing x number of instructions");
 
 KNOB<string> KnobInstCat(KNOB_MODE_WRITEONCE,         "pintool",
-                            "inst_cat", "I_PURE_LOAD", "What category of instructions?");
+                            "inst_cat", "ALL", "What category of instructions?");
                             
 // KNOB<UINT64> KnobTableSize(KNOB_MODE_WRITEONCE,        "pintool",
 //                             "size", "8", "Size of array entries");                             
@@ -96,6 +128,8 @@ public:
     }
 }; 
 
+
+// cout << a << endl
 std::ostream& operator<<(std::ostream &strm, const regval &a) {
     switch(a.real_type){
         case freg:
@@ -136,8 +170,8 @@ public:
     UINT32 category; // pretty print using  CATEGORY_StringShort
     UINT32 opcode; // pretty print using OPCODE_StringShort
     UINT32 num_read_reg; //INS_MaxNumRRegs(ins) 
-    std::vector<REG> read_regs;
-    REG write_reg;
+    std::vector<REG> read_regs;  // REG is pin datatype
+    REG write_reg;  // output register
     RT datatype; 
 
     //Below are some statistics and other info about the instructions
@@ -145,7 +179,7 @@ public:
     UINT64 hit_count; //number of times the instruction has been executed.
     UINT64 pred_success;
     regval last_value_seen;//What's the last value stored to the out register? 
-    bool flag; 
+    INST_CAT flag; 
 
     INST_DATA(INS ins){
         disassembly = INS_Disassemble(ins);
@@ -169,12 +203,10 @@ public:
         hit_count = 0; //total number of times this instruction has been executed 
         pred_success = 0; //how many times does current value = last_value_seen? Value locality = pred_success / hit_count
         last_value_seen = regval((void*)ZEROBUF, datatype); 
-        flag = false; //set the flag when registering this instruction if it is and instruction class we are testing
+        flag = UNKNOWN; //set the flag when registering this instruction if it is and instruction class we are testing
     }
 };
 std::map<ADDRINT, INST_DATA*> inst_data;
-
-
 
 VOID populate_regs(){
     for(int rn = REG_INVALID_; rn != REG_LAST; rn++){
@@ -255,12 +287,16 @@ VOID PrintResults(bool limit_reached)
     //Aggregates the value locality statistics from all instructions that have flag set. 
     UINT32 total_success = 0;
     UINT32 total_hit_count = 0;
+    UINT32 success_per_category[CATEGORIES] = {0};
+    UINT32 hit_per_category[CATEGORIES] = {0};
     out << "Degree of Value Locality: " << endl;
     FOR_X_IN_Y(i, inst_data){
         if(i->second->flag){
             total_success += i->second->pred_success;
             total_hit_count  +=  i->second->hit_count;
             out << i->second->disassembly << ": " << i->second->pred_success << "/" << i->second->hit_count << endl;
+            success_per_category[i->second->flag] += i->second->pred_success;
+            hit_per_category[i->second->flag] += i->second->hit_count;
         }
     }
     out << "Total : " << total_success << "/" << total_hit_count << endl;
@@ -272,6 +308,10 @@ VOID PrintResults(bool limit_reached)
     else
         out << "Reason: fini\n";
     out << "Output:" << endl;
+
+    for(short i = 0; i < CATEGORIES; i++) {
+      out << INST_CAT_s[i] << ": " << success_per_category[i] << "/" << hit_per_category[i] << endl;
+    }
 
 }
 
@@ -285,12 +325,13 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
     insts_executed++;    
     ins_data->hit_count++;
 
+    // ref is pointer to area of memory
     regval value_to_write = regval(ref, ins_data->datatype);
 
 #ifdef PRINTF
     cout << ins_data->disassembly << endl;
 
-    cout << "Instruction " << (ins_ptr & 0xFFFF) << " wrote value (" <<  rt_name[ins_data->datatype]  <<"): " << value_to_write <<","  << ins_data->last_value_seen << " to " <<REG_StringShort(ins_data->write_reg)  <<endl; 
+    cout << "IP " << (ins_ptr & 0xFFFF) << " wrote val (" <<  rt_name[ins_data->datatype]  <<"): " << value_to_write <<","  << ins_data->last_value_seen << " to " <<REG_StringShort(ins_data->write_reg)  <<endl; 
 #endif
 
     if(value_to_write == ins_data->last_value_seen){
@@ -299,55 +340,64 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
     ins_data->last_value_seen = value_to_write; 
 }
 
-bool is_selected_instr_cat(INS ins, REG write_reg){
-    if(KnobInstCat.Value().compare("I_PURE_LOAD") == 0){
-        return (INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER);
-    } else if(KnobInstCat.Value().compare("I_LOAD_ARITH") == 0){
-        return (INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && IS_ARITHMETIC(INS_Category(ins)));
-    } else if(KnobInstCat.Value().compare("I_PURE_ARITH") == 0){
-        return (!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && IS_ARITHMETIC(INS_Category(ins)));
-    } else if(KnobInstCat.Value().compare("I_ARITH_1OP") == 0){
-        return (!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)) && INS_MaxNumRRegs(ins) == 1);
-    } else if(KnobInstCat.Value().compare("I_ARITH_2OP") == 0){
-        return (!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)) && INS_MaxNumRRegs(ins) == 2);
-    } else if(KnobInstCat.Value().compare("I_ARITH_3OP") == 0){
-        return (!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)) && INS_MaxNumRRegs(ins) == 3);
-    } else if(KnobInstCat.Value().compare("I_REG_MOV") == 0){
-        return (!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER );
-    } else if(KnobInstCat.Value().compare("F_PURE_LOAD") == 0){
-        return (INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER);
-    } else if(KnobInstCat.Value().compare("F_LOAD_ARITH") == 0){
-        return (INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && IS_ARITHMETIC(INS_Category(ins)));
-    } else if(KnobInstCat.Value().compare("F_PURE_ARITH") == 0){
-        return (!INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)));
-    } else if(KnobInstCat.Value().compare("F_REG_MOVE") == 0){
-        return (!INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER);
-    } else{
-        assert(false);
-    }
-    return false;
+INST_CAT set_instr_cat(INS ins, REG write_reg){
+  if(INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER) { 
+    return I_PURE_LOAD;
+  } else if(INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && IS_ARITHMETIC(INS_Category(ins))) {
+    return I_LOAD_ARITH;
+  } else if(!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && IS_ARITHMETIC(INS_Category(ins))) {
+    return I_PURE_ARITH;
+  } else if(!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)) && INS_MaxNumRRegs(ins) == 1) {
+    return I_ARITH_1OP;
+  } else if(!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)) && INS_MaxNumRRegs(ins) == 2) {
+    return I_ARITH_2OP;
+  } else if(!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins)) && INS_MaxNumRRegs(ins) == 3) {
+    return I_ARITH_3OP;
+  } else if(!INS_IsMemoryRead(ins) && !IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER) {
+    return I_REG_MOV;
+  } else if(INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER) {
+    return F_PURE_LOAD;
+  } else if(INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && IS_ARITHMETIC(INS_Category(ins))) {
+    return F_LOAD_ARITH;
+  } else if(!INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) != XED_CATEGORY_DATAXFER && !IS_ARITHMETIC(INS_Category(ins))) {
+    return F_PURE_ARITH;
+  } else if(!INS_IsMemoryRead(ins) && IS_FLOAT(regtype[write_reg]) && INS_Category(ins) == XED_CATEGORY_DATAXFER) {
+    return F_REG_MOVE;
+  } else {
+    return UNKNOWN;
+  }
 }
 
 VOID Instruction(INS ins, void *v){
     //Let's assume instructions only write to one register.
     // if the instruction does write to multiple registers, the one we care about 
     // is the last register it writes to whose type is in regtype.
-    REG write_reg = REG_INVALID_;
+    REG write_reg = REG_INVALID_; // Register ID instruction writes to
     REG reg_iterate;
+    // Iterated each of the the registers
+    // Swaps will write to multiple registers - might want to blacklist
     for(int i = 0; (reg_iterate = INS_RegW(ins,i)) != REG_INVALID_; i++){
+        // Save the last register we write to
         if(!X_IN_Y(reg_iterate, regtype)){ continue; } //if not (reg_iterate in regtype)
         write_reg = reg_iterate;
     }
     if(write_reg == REG_INVALID_){ return; }
+    // Checks that we can attach instrumentation after instruction (e.g. no branch)
     if(!INS_IsValidForIpointAfter(ins)){return;} //we want to insert the instrumentation after the instruction.
+    
+    // pin does not support some addresses
+    if(REG_StringShort(write_reg).compare("mxcsr") == 0){return;}
+    else if (REG_StringShort(write_reg).compare("st0") == 0){return;}
+    else if (REG_StringShort(write_reg).compare("st1") == 0){return;}
+    else if (REG_StringShort(write_reg).compare("st2") == 0){return;}
+    else if (REG_StringShort(write_reg).compare("st3") == 0){return;}
 
     if(!X_IN_Y(INS_Address(ins), inst_data)){
         inst_data[INS_Address(ins)] = new INST_DATA(ins);        
     }
 
-    if(is_selected_instr_cat(ins, write_reg)){
-        inst_data[INS_Address(ins)] -> flag = true;
-    }
+    // Set instruction category 
+    inst_data[INS_Address(ins)] -> flag = set_instr_cat(ins, write_reg);
 
 #ifndef DUMP_INSTS_USED
     INS_InsertCall(ins, IPOINT_AFTER, (AFUNPTR) value_predict, 
