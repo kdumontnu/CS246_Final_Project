@@ -5,7 +5,6 @@
 #include "pin.H"
 #include <set>
 #include <map> 
-#include <cmath>
 
 //Disable any instrumentation and dump all the instructions in the test program that we care about
 // ie. instuctions that write to a register.  
@@ -18,7 +17,7 @@ using std::cout;
 using std::cerr;;
 using std::string;
 using std::endl;
-using std::pow;
+
 std::ostream * out = &cerr;
 #define X_IN_Y(x,y) (y.find(x) != y.end())
 #define FOR_X_IN_Y(x,y) for (auto x = y.begin(); x != y.end(); x++) 
@@ -27,6 +26,13 @@ std::ostream * out = &cerr;
                             || t == XED_CATEGORY_CONVERT || t == XED_CATEGORY_LOGICAL || t ==  XED_CATEGORY_LOGICAL_FP \
                             || t == XED_CATEGORY_MISC  || t ==  XED_CATEGORY_SETCC || t == XED_CATEGORY_SHIFT \
                             || t == XED_CATEGORY_SSE || t == XED_CATEGORY_X87_ALU )
+
+// Create function for x^y
+UINT32 POW(UINT32 x, UINT32 y) {
+  UINT32 x_y = 1;
+  for (UINT32 i = 0; i < y; i++) { x_y *= x ; }
+  return x_y;
+};
 
 // Category for instruction
 enum INST_CAT {
@@ -78,21 +84,14 @@ KNOB<string> KnobInstCat(KNOB_MODE_WRITEONCE,         "pintool",
 KNOB<UINT64> KnobTableSize(KNOB_MODE_WRITEONCE,        "pintool",
                             "size", "8", "Size of Value Prediction table in bits. Total length = 2**size");     
                             
-// KNOB<UINT64> KnobTableSize(KNOB_MODE_WRITEONCE,        "pintool",
-//                             "size", "8", "Size of array entries");                             
+KNOB<UINT64> KnobCTSize(KNOB_MODE_WRITEONCE,        "pintool",
+                            "CTsize", "1", "Size of CT prediction history in bits");                             
 
 enum RT{freg=1, i8reg=2, i16reg=3, i32reg=4, i64reg=5}; 
 #define IS_FLOAT(type) ((type == freg))
 std::string rt_name[] = {"", "Float Reg", "8 Bit Int", "16 Bit Int", "32 Bit Int", "64 Bit Int"};
 std::set<REG> allreg;
 std::map<REG, RT> regtype;
-
-/* ===================================================================== */
-/* Value Prediction Unit                                                 */
-/* ===================================================================== */
-UINT8 VPT_BITS = KnobTableSize.Value(); // Number of bits to use as VPT address
-UINT8 VPT_MASK = VPT_BITS - 1;          // Mask for VPT address table
-UINT32 VPT_ENTREIS = pow(2, VPT_BITS);  // Length of VPT table
 
 UINT8 ZEROBUF[] = "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
 
@@ -166,7 +165,6 @@ std::ostream& operator<<(std::ostream &strm, const regval &a) {
     }
 }
 
-
 //global number of instructions executed
 UINT64 insts_executed; 
 //The data in this class are properties of the instruction itself
@@ -186,7 +184,9 @@ public:
     //Below are some statistics and other info about the instructions
     // these may be modified whenever the instruction is hit
     UINT64 hit_count; //number of times the instruction has been executed.
-    UINT64 pred_success;
+    UINT64 prev_seen; // number of times the data matched previous execution
+    UINT64 pred_success;  // Number of times the instruction is successfully predicted
+    UINT64 pred_failed;   // Number of times the entry is incorrectly predicted
     regval last_value_seen;//What's the last value stored to the out register? 
     INST_CAT flag; 
 
@@ -210,12 +210,38 @@ public:
         }
 
         hit_count = 0; //total number of times this instruction has been executed 
-        pred_success = 0; //how many times does current value = last_value_seen? Value locality = pred_success / hit_count
+        prev_seen = 0; //how many times does current value = last_value_seen? Value locality = prev_seen / hit_count
+        pred_success = 0;
+        pred_failed = 0;
         last_value_seen = regval((void*)ZEROBUF, datatype); 
         flag = UNKNOWN; //set the flag when registering this instruction if it is and instruction class we are testing
     }
 };
 std::map<ADDRINT, INST_DATA*> inst_data;
+
+/* ===================================================================== */
+/* Value Prediction Unit                                                 */
+/* ===================================================================== */
+UINT8 VPT_BITS;      // Number of bits to use as VPT address
+UINT32 VPT_ENTRIES;  // Length of VPT table
+UINT32 VPT_MASK;     // Mask for VPT address table
+UINT8 CT_BITS;       // Size of prediction in bits
+UINT8 CT_MAX;        // Size of prediction
+UINT8 CT_PRED_TH;    // Threshold to use for prediction CT_Max/2
+UINT8 CT_REP_TH;     // Threshold to replace value history
+
+// Entry for Value Prediction Table
+class VPT_ENTRY {
+public:
+  regval value_history;     // Stores the previous value
+  UINT8 prediction_history; // Used to determine whether we will use historic value (CT entry)
+  VPT_ENTRY() {
+    prediction_history = 0;
+  }
+};
+
+// Declare global Value Prediction Table
+std::map<ADDRINT, VPT_ENTRY*> vpt;
 
 VOID populate_regs(){
     for(int rn = REG_INVALID_; rn != REG_LAST; rn++){
@@ -294,35 +320,55 @@ VOID PrintResults(bool limit_reached)
 #endif
 
     //Aggregates the value locality statistics from all instructions that have flag set. 
-    UINT32 total_success = 0;
+    UINT32 total_prev = 0;
     UINT32 total_hit_count = 0;
-    UINT32 success_per_category[CATEGORIES] = {0};
+    UINT32 total_success = 0;
+    UINT32 total_fail = 0;
+    UINT32 prev_per_category[CATEGORIES] = {0};
     UINT32 hit_per_category[CATEGORIES] = {0};
+    UINT32 success_per_category[CATEGORIES] = {0};
+    UINT32 fail_per_category[CATEGORIES] = {0};
     out << "Degree of Value Locality: " << endl;
     FOR_X_IN_Y(i, inst_data){
         if(i->second->flag){
-            total_success += i->second->pred_success;
+            total_prev += i->second->prev_seen;
             total_hit_count  +=  i->second->hit_count;
-            out << i->second->disassembly << ": " << i->second->pred_success << "/" << i->second->hit_count << endl;
-            success_per_category[i->second->flag] += i->second->pred_success;
+            total_success += i->second->pred_success;
+            total_fail += i->second->pred_failed;
+            out << i->second->disassembly << ": " << i->second->prev_seen << "/" << i->second->hit_count << endl;
+            prev_per_category[i->second->flag] += i->second->prev_seen;
             hit_per_category[i->second->flag] += i->second->hit_count;
+            success_per_category[i->second->flag] += i->second->pred_success;
+            fail_per_category[i->second->flag] += i->second->pred_failed;
         }
     }
-    out << "Total : " << total_success << "/" << total_hit_count << endl;
 
-
-    out << "Instruction total: " << insts_executed << endl;
+    out << "Instruction total| " << insts_executed << endl;
     if(limit_reached)
-        out << "Reason: limit reached\n";
+        out << "Reason| limit reached\n";
     else
-        out << "Reason: fini\n";
-    out << "Output:" << endl;
+        out << "Reason| fini\n";
 
-    out << "OPERATION" << "|" << "SUCCESS COUNT" << "|" << "TOTAL_COUNT" << endl;
+    out << endl << "============== LOCALITY DATA =============" << endl;
+    out << "OPERATION" << "|" << "LOCALITY_COUNT" << "|" << "TOTAL_COUNT" << "|" << "SUCCESS_COUNT" << "|" << "FAIL_COUNT" << endl;
+    out << "Total|" << total_prev << "|" << total_hit_count << "|" << total_success << "|" << total_fail << endl;
     for(short i = 0; i < CATEGORIES; i++) {
-      out << INST_CAT_s[i] << "|" << success_per_category[i] << "|" << hit_per_category[i] << endl;
+      out << INST_CAT_s[i] << "|" << prev_per_category[i] << "|" << hit_per_category[i] << "|" << success_per_category[i] << "|" << fail_per_category[i] << endl;
     }
 
+    out << endl << "============== VPT SETTINGS ==============" << endl;
+    out << "VPT_BITS" << "|" << (UINT32)VPT_BITS << endl;
+    out << "VPT_MASK" << "|" << (UINT32)VPT_MASK << endl;
+    out << "VPT_ENTRIES" << "|" << (UINT32)VPT_ENTRIES << endl;
+    out << "CT_BITS" << "|" << (UINT32)CT_BITS << endl;
+    out << "CT_MAX" << "|" << (UINT32)CT_MAX << endl;
+    out << "CT_PRED_TH" << "|" << (UINT32)CT_PRED_TH << endl;
+    out << "CT_REP_TH" << "|" << (UINT32)CT_REP_TH << endl;
+
+    //out << endl << "=============== VPT DATA ================" << endl;
+    //FOR_X_IN_Y(i, vpt) {
+    //  cout << OPCODE_StringShort(i->first) << "|" << (UINT32)i->second->prediction_history << endl;
+    //}
 }
 
 
@@ -344,10 +390,57 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
     cout << "IP " << (ins_ptr & 0xFFFF) << " wrote val (" <<  rt_name[ins_data->datatype]  <<"): " << value_to_write <<","  << ins_data->last_value_seen << " to " <<REG_StringShort(ins_data->write_reg)  <<endl; 
 #endif
 
+    // Update list of all instructions
     if(value_to_write == ins_data->last_value_seen){
-        ins_data->pred_success++; 
+        ins_data->prev_seen++; 
     } 
     ins_data->last_value_seen = value_to_write; 
+
+    UINT32 vpt_index = ins_ptr & VPT_MASK; // Calculate index in VPT
+
+    // Create VPT entry if it doesn't exist
+    if(!X_IN_Y(vpt_index, vpt)){
+      #ifdef PRINTF
+      cout << "IP: " << ins_ptr << " --> " << (vpt_index) << endl;
+      #endif
+      vpt[vpt_index] = new VPT_ENTRY();          // Initialize class entry
+      vpt[vpt_index]->value_history = value_to_write;  // Set VPT entry to write value
+    }
+    else {
+      #ifdef PRINTF
+      cout << "IP: " << ins_ptr << " [" << (vpt_index) << "]" << endl;
+      // need to calculate if above threshold
+      cout << "Old val: " << vpt[vpt_index]->value_history << endl;
+      cout << "New val: " << value_to_write << endl;
+      #endif
+      if(value_to_write.real_type == vpt[vpt_index]->value_history.real_type &&
+          value_to_write == vpt[vpt_index]->value_history) {
+        #ifdef PRINTF
+        cout << "SUCCESS" << endl;
+        #endif
+        // If it's passed the threshold make prediction
+        if(vpt[vpt_index]->prediction_history >= CT_PRED_TH) {
+          ins_data->pred_success++;
+        }
+        // Increment prediction history
+        if(vpt[vpt_index]->prediction_history < CT_MAX) { vpt[vpt_index]->prediction_history++; }
+      }
+      else {
+        #ifdef PRINTF
+        cout << "FAIL" << endl;
+        #endif
+        // If it's passed the threshold make (wrong) prediction
+        if(vpt[vpt_index]->prediction_history >= CT_PRED_TH) {
+          ins_data->pred_failed++;
+        }
+        // Decrement prediction history
+        if(vpt[vpt_index]->prediction_history > 0) { vpt[vpt_index]->prediction_history--; }
+      }
+      // Update actual VPT unless we are over the replacement threshold
+      if(!(vpt[vpt_index]->prediction_history >= CT_REP_TH)) {
+        vpt[vpt_index]->value_history = value_to_write;
+      }
+    }
 }
 
 INST_CAT set_instr_cat(INS ins, REG write_reg){
@@ -428,6 +521,32 @@ int main(int argc, char *argv[])
     if( PIN_Init(argc,argv) )
     {
         return Usage();
+    }
+
+    VPT_BITS = KnobTableSize.Value(); // Number of bits to use as VPT address
+    VPT_ENTRIES = POW(2, VPT_BITS);  // Length of VPT table
+    VPT_MASK = VPT_ENTRIES - 1;      // Mask for VPT address table
+    CT_BITS = KnobCTSize.Value();     // Size of prediction in bits
+    CT_MAX = POW(2, CT_BITS) - 1;     // Size of prediction
+    // Set the prediction thresholds. CT_BITS = 0 will always make prediction
+    // From Table 3 Lipasti
+    switch(CT_BITS) {
+      case 0:
+        CT_MAX = 0;
+        CT_PRED_TH = 0;
+        CT_REP_TH = 0;
+      case 1:
+        CT_PRED_TH = 1;
+        CT_REP_TH = 1;
+      case 2:
+        CT_PRED_TH = 2;
+        CT_REP_TH = 3;
+      case 3:
+        CT_PRED_TH = 2;
+        CT_REP_TH = 5;
+      default:
+        CT_PRED_TH = POW(2, CT_BITS - 1);      // Threshold to use for prediction CT_Max/2
+        CT_REP_TH = CT_MAX;
     }
 
     insts_executed = 0;
