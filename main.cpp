@@ -535,15 +535,19 @@ int main(int argc, char *argv[])
         CT_MAX = 0;
         CT_PRED_TH = 0;
         CT_REP_TH = 0;
+        break;
       case 1:
         CT_PRED_TH = 1;
         CT_REP_TH = 1;
+        break;
       case 2:
         CT_PRED_TH = 2;
         CT_REP_TH = 3;
+        break;
       case 3:
         CT_PRED_TH = 2;
         CT_REP_TH = 5;
+        break;
       default:
         CT_PRED_TH = POW(2, CT_BITS - 1);      // Threshold to use for prediction CT_Max/2
         CT_REP_TH = CT_MAX;
