@@ -27,9 +27,9 @@ log = measure.log
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
 transfer_input_files = obj-intel64/main.so, pin.log
-transfer_output_files = pin.log, run_ls-2-$(size).out, run_libQ-2-$(size).out, run_hmmer-2-$(size).out, run_deal-2-$(size).out
+transfer_output_files = pin.log, run_ls.out, run_libQ.out, run_hmmer.out, run_deal.out
 
 # submit a job with the parameters given above
 arguments = main.so /usr/local/benchmarks/dealII_O3 $(size)
-queue size in 1, 2, 4, 8, 14
-#queue size in 1
+#queue size in 1, 2, 4, 8, 14
+queue size in 12

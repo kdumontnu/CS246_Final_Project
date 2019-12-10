@@ -84,8 +84,11 @@ KNOB<string> KnobInstCat(KNOB_MODE_WRITEONCE,         "pintool",
 KNOB<UINT64> KnobTableSize(KNOB_MODE_WRITEONCE,        "pintool",
                             "size", "8", "Size of Value Prediction table in bits. Total length = 2**size");     
                             
+KNOB<UINT64> KnobCTbits(KNOB_MODE_WRITEONCE,        "pintool",
+                            "CTbits", "1", "Size of CT prediction history in bits");                             
+
 KNOB<UINT64> KnobCTSize(KNOB_MODE_WRITEONCE,        "pintool",
-                            "CTsize", "1", "Size of CT prediction history in bits");                             
+                            "CTsize", "8", "Size of Classification table in bits");      
 
 enum RT{freg=1, i8reg=2, i16reg=3, i32reg=4, i64reg=5}; 
 #define IS_FLOAT(type) ((type == freg))
@@ -225,23 +228,27 @@ std::map<ADDRINT, INST_DATA*> inst_data;
 UINT8 VPT_BITS;      // Number of bits to use as VPT address
 UINT32 VPT_ENTRIES;  // Length of VPT table
 UINT32 VPT_MASK;     // Mask for VPT address table
+UINT32 CT_ENTRIES;   // Length of Classification Table
+UINT32 CT_MASK;       // Bitmask for Classification table entries
 UINT8 CT_BITS;       // Size of prediction in bits
 UINT8 CT_MAX;        // Size of prediction
 UINT8 CT_PRED_TH;    // Threshold to use for prediction CT_Max/2
 UINT8 CT_REP_TH;     // Threshold to replace value history
+bool CT_PERF;        // CT is perfect - never fails
 
 // Entry for Value Prediction Table
 class VPT_ENTRY {
 public:
   regval value_history;     // Stores the previous value
-  UINT8 prediction_history; // Used to determine whether we will use historic value (CT entry)
-  VPT_ENTRY() {
-    prediction_history = 0;
-  }
+  //UINT8 prediction_history; // Used to determine whether we will use historic value (CT entry)
+  VPT_ENTRY() {}
 };
 
 // Declare global Value Prediction Table
 std::map<ADDRINT, VPT_ENTRY*> vpt;
+
+// Declare global Classification Table
+std::map<ADDRINT, UINT8> ct;
 
 VOID populate_regs(){
     for(int rn = REG_INVALID_; rn != REG_LAST; rn++){
@@ -358,8 +365,8 @@ VOID PrintResults(bool limit_reached)
 
     out << endl << "============== VPT SETTINGS ==============" << endl;
     out << "VPT_BITS" << "|" << (UINT32)VPT_BITS << endl;
-    out << "VPT_MASK" << "|" << (UINT32)VPT_MASK << endl;
     out << "VPT_ENTRIES" << "|" << (UINT32)VPT_ENTRIES << endl;
+    out << "CT_ENTRIES" << "|" << (UINT32)CT_ENTRIES << endl;
     out << "CT_BITS" << "|" << (UINT32)CT_BITS << endl;
     out << "CT_MAX" << "|" << (UINT32)CT_MAX << endl;
     out << "CT_PRED_TH" << "|" << (UINT32)CT_PRED_TH << endl;
@@ -396,7 +403,8 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
     } 
     ins_data->last_value_seen = value_to_write; 
 
-    UINT32 vpt_index = ins_ptr & VPT_MASK; // Calculate index in VPT
+    UINT32 vpt_index = ins_ptr & VPT_MASK;  // Calculate index in VPT
+    UINT32 ct_index = ins_ptr & CT_MASK;    // Calculate index in VPT
 
     // Create VPT entry if it doesn't exist
     if(!X_IN_Y(vpt_index, vpt)){
@@ -406,9 +414,13 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
       vpt[vpt_index] = new VPT_ENTRY();          // Initialize class entry
       vpt[vpt_index]->value_history = value_to_write;  // Set VPT entry to write value
     }
+
+    if(!X_IN_Y(ct_index, ct)){
+      ct[ct_index] = 0;
+    }
     else {
       #ifdef PRINTF
-      cout << "IP: " << ins_ptr << " [" << (vpt_index) << "]" << endl;
+      cout << "IP: " << ins_ptr << " [" << (ct_index) << "]" << endl;
       // need to calculate if above threshold
       cout << "Old val: " << vpt[vpt_index]->value_history << endl;
       cout << "New val: " << value_to_write << endl;
@@ -419,25 +431,25 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
         cout << "SUCCESS" << endl;
         #endif
         // If it's passed the threshold make prediction
-        if(vpt[vpt_index]->prediction_history >= CT_PRED_TH) {
+        if(CT_PERF || ct[ct_index] >= CT_PRED_TH) {
           ins_data->pred_success++;
         }
         // Increment prediction history
-        if(vpt[vpt_index]->prediction_history < CT_MAX) { vpt[vpt_index]->prediction_history++; }
+        if(ct[ct_index] < CT_MAX) { ct[ct_index]++; }
       }
       else {
         #ifdef PRINTF
         cout << "FAIL" << endl;
         #endif
         // If it's passed the threshold make (wrong) prediction
-        if(vpt[vpt_index]->prediction_history >= CT_PRED_TH) {
+        if(!CT_PERF && ct[ct_index] >= CT_PRED_TH) {
           ins_data->pred_failed++;
         }
         // Decrement prediction history
-        if(vpt[vpt_index]->prediction_history > 0) { vpt[vpt_index]->prediction_history--; }
+        if(ct[ct_index] > 0) { ct[ct_index]--; }
       }
       // Update actual VPT unless we are over the replacement threshold
-      if(!(vpt[vpt_index]->prediction_history >= CT_REP_TH)) {
+      if(!(ct[ct_index] >= CT_REP_TH)) {
         vpt[vpt_index]->value_history = value_to_write;
       }
     }
@@ -523,10 +535,14 @@ int main(int argc, char *argv[])
         return Usage();
     }
 
-    VPT_BITS = KnobTableSize.Value(); // Number of bits to use as VPT address
-    VPT_ENTRIES = POW(2, VPT_BITS);  // Length of VPT table
-    VPT_MASK = VPT_ENTRIES - 1;      // Mask for VPT address table
-    CT_BITS = KnobCTSize.Value();     // Size of prediction in bits
+    VPT_BITS = KnobTableSize.Value();       // Number of bits to use as VPT address
+    VPT_ENTRIES = POW(2, VPT_BITS);         // Length of VPT table
+    VPT_MASK = VPT_ENTRIES - 1;             // Mask for VPT address table
+    UINT8 ct_size = KnobCTSize.Value();     // CT table length, 0 = perfect
+    if (ct_size) { CT_PERF = true; }
+    CT_ENTRIES = POW(2, KnobCTSize.Value()); // Length of CT table
+    CT_MASK = CT_ENTRIES - 1;               // Mask for CT table
+    CT_BITS = KnobCTbits.Value();     // Size of prediction in bits
     CT_MAX = POW(2, CT_BITS) - 1;     // Size of prediction
     // Set the prediction thresholds. CT_BITS = 0 will always make prediction
     // From Table 3 Lipasti

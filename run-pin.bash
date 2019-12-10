@@ -15,9 +15,9 @@ touch pin.log
 
 date
 
-pin -t "$tool" -outfile run_ls-2-"$size".out -size "$size" -CTsize 2 -- /bin/ls
-pin -t "$tool" -outfile run_libQ-2-"$size".out -size "$size" -CTsize 2 -- /usr/local/benchmarks/libquantum_O3 400 25
-pin -t "$tool" -outfile run_hmmer-2-"$size".out -size "$size" -CTsize 2 -- /usr/local/benchmarks/hmmer_O3 /usr/local/benchmarks/inputs/nph3.hmm /usr/local/benchmarks/inputs/swiss41
-pin -t "$tool" -outfile run_deal-2-"$size".out -size "$size" -CTsize 2 -- /usr/local/benchmarks/dealII_O3 10
+pin -t "$tool" -outfile run_ls.out -size "$size" -CTsize 10 -CTbits 2 -- /bin/ls
+pin -t "$tool" -outfile run_libQ.out -size "$size" -CTsize 10 -CTbits 2 -- /usr/local/benchmarks/libquantum_O3 400 25
+pin -t "$tool" -outfile run_hmmer.out -size "$size" -CTsize 10 -CTbits 2 -- /usr/local/benchmarks/hmmer_O3 /usr/local/benchmarks/inputs/nph3.hmm /usr/local/benchmarks/inputs/swiss41
+pin -t "$tool" -outfile run_deal.out -size "$size" -CTsize 10 -CTbits 2 -- /usr/local/benchmarks/dealII_O3 10
 
 date
