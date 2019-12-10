@@ -5,13 +5,15 @@
 #include "pin.H"
 #include <set>
 #include <map> 
+#include <list>
+#include <algorithm>
 
 //Disable any instrumentation and dump all the instructions in the test program that we care about
 // ie. instuctions that write to a register.  
 //#define DUMP_INSTS_USED
 
 //turn on printf debug messages
-//#define PRINTF
+#define PRINTF
 
 using std::cout;
 using std::cerr;
@@ -20,6 +22,7 @@ using std::endl;
 
 std::ostream * out = &cerr;
 #define X_IN_Y(x,y) (y.find(x) != y.end())
+#define X_IN_LIST_Y(x,y) (std::find(y.begin(), y.end(), x) != y.end() )
 #define FOR_X_IN_Y(x,y) for (auto x = y.begin(); x != y.end(); x++) 
 #define OPCODE_IS(o, s) (OPCODE_StringShort(o).compare(s)==0)
 #define IS_ARITHMETIC(t) (t == XED_CATEGORY_AVX || t ==  XED_CATEGORY_AVX2 || t == XED_CATEGORY_BINARY \
@@ -90,6 +93,9 @@ KNOB<UINT64> KnobCTbits(KNOB_MODE_WRITEONCE,        "pintool",
 KNOB<UINT64> KnobCTSize(KNOB_MODE_WRITEONCE,        "pintool",
                             "CTsize", "8", "Size of Classification table in bits");      
 
+KNOB<UINT64> KnobHistDepth(KNOB_MODE_WRITEONCE,        "pintool",
+                            "HistDepth", "1", "Value history size");      
+
 enum RT{freg=1, i8reg=2, i16reg=3, i32reg=4, i64reg=5}; 
 #define IS_FLOAT(type) ((type == freg))
 std::string rt_name[] = {"", "Float Reg", "8 Bit Int", "16 Bit Int", "32 Bit Int", "64 Bit Int"};
@@ -115,7 +121,7 @@ public:
         }
         real_type = type;
     } 
-    bool operator==(const regval& other) {
+    bool operator==(const regval& other) const {
         assert(real_type == other.real_type);
         switch(real_type){
             case freg:
@@ -137,6 +143,7 @@ public:
                 assert(false);
         }
     }
+
 }; 
 
 
@@ -237,10 +244,12 @@ UINT8 CT_PRED_TH;    // Threshold to use for prediction CT_Max/2
 UINT8 CT_REP_TH;     // Threshold to replace value history
 bool CT_PERF;        // CT is perfect - never fails
 
+
 // Entry for Value Prediction Table
 class VPT_ENTRY {
 public:
-  regval value_history;     // Stores the previous value
+  std::list<regval> value_history; //value history. Most recently used is at index 0. maximum length is KnobHistDepth
+  ADDRINT tag; //What's the address? 
   //UINT8 prediction_history; // Used to determine whether we will use historic value (CT entry)
   VPT_ENTRY() {}
 };
@@ -411,13 +420,21 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
     UINT32 vpt_index = ins_ptr & VPT_MASK;  // Calculate index in VPT
     UINT32 ct_index = ins_ptr & CT_MASK;    // Calculate index in VPT
 
+
+    //If there's a collision in the VPT, then evict the old one. 
+    if(X_IN_Y(vpt_index, vpt) && ins_ptr != vpt[vpt_index]->tag ){
+        delete vpt[vpt_index];
+        vpt.erase(vpt_index);
+    }
+
     // Create VPT entry if it doesn't exist
     if(!X_IN_Y(vpt_index, vpt)){
       #ifdef PRINTF
       cout << "IP: " << ins_ptr << " --> " << (vpt_index) << endl;
       #endif
       vpt[vpt_index] = new VPT_ENTRY();          // Initialize class entry
-      vpt[vpt_index]->value_history = value_to_write;  // Set VPT entry to write value
+      vpt[vpt_index]->tag = ins_ptr;
+      vpt[vpt_index]->value_history.push_front(value_to_write);  // put write value as first VPT 
     }
 
     if(!X_IN_Y(ct_index, ct)){
@@ -427,11 +444,15 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
       #ifdef PRINTF
       cout << "IP: " << ins_ptr << " [" << (ct_index) << "]" << endl;
       // need to calculate if above threshold
-      cout << "Old val: " << vpt[vpt_index]->value_history << endl;
+      cout << "Old val(s): "; 
+      FOR_X_IN_Y(vh_val, vpt[vpt_index]->value_history){
+        cout << *vh_val << ", ";
+      }
+      cout << endl;
       cout << "New val: " << value_to_write << endl;
       #endif
-      if(value_to_write.real_type == vpt[vpt_index]->value_history.real_type &&
-          value_to_write == vpt[vpt_index]->value_history) {
+
+      if(X_IN_LIST_Y(value_to_write, vpt[vpt_index]->value_history) ) {
         #ifdef PRINTF
         cout << "SUCCESS" << endl;
         #endif
@@ -458,8 +479,27 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
       }
       // Update actual VPT unless we are over the replacement threshold
       if(!(ct[ct_index] >= CT_REP_TH)) {
-        vpt[vpt_index]->value_history = value_to_write;
+
+        //if we found an value we used before, just move it to the front (to keep track of LRU) 
+        if(X_IN_LIST_Y(value_to_write, vpt[vpt_index]->value_history) ){
+            vpt[vpt_index]->value_history.remove(value_to_write);
+            vpt[vpt_index]->value_history.push_front(value_to_write);
+        }else{
+            //add a new value to our value history (if space permits)
+            if(vpt[vpt_index]->value_history.size() >= KnobHistDepth.Value() ){
+                //Evict!!
+                vpt[vpt_index]->value_history.pop_back();
+            }
+            vpt[vpt_index]->value_history.push_front(value_to_write);
+        }
       }
+      #ifdef PRINTF
+      cout << "Updated Value History: "; 
+      FOR_X_IN_Y(vh_val, vpt[vpt_index]->value_history){
+        cout << *vh_val << ", ";
+      }
+      cout << endl;
+      #endif  
     }
 }
 
