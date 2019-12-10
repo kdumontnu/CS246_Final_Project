@@ -13,7 +13,7 @@
 //#define DUMP_INSTS_USED
 
 //turn on printf debug messages
-#define PRINTF
+//#define PRINTF
 
 using std::cout;
 using std::cerr;
@@ -380,12 +380,13 @@ VOID PrintResults(bool limit_reached)
     out << endl << "============== VPT SETTINGS ==============" << endl;
     out << "VPT_BITS" << "|" << (UINT32)VPT_BITS << endl;
     out << "VPT_ENTRIES" << "|" << (UINT32)VPT_ENTRIES << endl;
+    out << "VH_DEPTH" << "|" << (UINT32)KnobHistDepth.Value() << endl;
     out << "CT_ENTRIES" << "|" << (UINT32)CT_ENTRIES << endl;
     out << "CT_PERF" << "|" << (bool)CT_PERF << endl;
-    out << "CT_MAX" << "|" << (UINT32)CT_MAX << endl;
     out << "CT_PRED_TH" << "|" << (UINT32)CT_PRED_TH << endl;
     out << "CT_REP_TH" << "|" << (UINT32)CT_REP_TH << endl;
 
+    out << endl << endl;
     //out << endl << "=============== VPT DATA ================" << endl;
     //FOR_X_IN_Y(i, vpt) {
     //  cout << OPCODE_StringShort(i->first) << "|" << (UINT32)i->second->prediction_history << endl;
