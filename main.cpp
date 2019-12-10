@@ -14,7 +14,7 @@
 //#define PRINTF
 
 using std::cout;
-using std::cerr;;
+using std::cerr;
 using std::string;
 using std::endl;
 
@@ -190,6 +190,7 @@ public:
     UINT64 prev_seen; // number of times the data matched previous execution
     UINT64 pred_success;  // Number of times the instruction is successfully predicted
     UINT64 pred_failed;   // Number of times the entry is incorrectly predicted
+    UINT64 missed_success; // Capture the number of correct predictions we missed
     regval last_value_seen;//What's the last value stored to the out register? 
     INST_CAT flag; 
 
@@ -331,22 +332,26 @@ VOID PrintResults(bool limit_reached)
     UINT32 total_hit_count = 0;
     UINT32 total_success = 0;
     UINT32 total_fail = 0;
+    UINT32 total_missed_success = 0;
     UINT32 prev_per_category[CATEGORIES] = {0};
     UINT32 hit_per_category[CATEGORIES] = {0};
     UINT32 success_per_category[CATEGORIES] = {0};
     UINT32 fail_per_category[CATEGORIES] = {0};
-    out << "Degree of Value Locality: " << endl;
+    UINT32 missed_success_per_category[CATEGORIES] = {0};
+    //out << "Degree of Value Locality: " << endl;
     FOR_X_IN_Y(i, inst_data){
         if(i->second->flag){
             total_prev += i->second->prev_seen;
             total_hit_count  +=  i->second->hit_count;
             total_success += i->second->pred_success;
             total_fail += i->second->pred_failed;
-            out << i->second->disassembly << ": " << i->second->prev_seen << "/" << i->second->hit_count << endl;
+            total_missed_success += i->second->missed_success;
+            //out << i->second->disassembly << ": " << i->second->prev_seen << "/" << i->second->hit_count << endl;
             prev_per_category[i->second->flag] += i->second->prev_seen;
             hit_per_category[i->second->flag] += i->second->hit_count;
             success_per_category[i->second->flag] += i->second->pred_success;
             fail_per_category[i->second->flag] += i->second->pred_failed;
+            missed_success_per_category[i->second->flag] += i->second->missed_success;
         }
     }
 
@@ -357,17 +362,17 @@ VOID PrintResults(bool limit_reached)
         out << "Reason| fini\n";
 
     out << endl << "============== LOCALITY DATA =============" << endl;
-    out << "OPERATION" << "|" << "LOCALITY_COUNT" << "|" << "TOTAL_COUNT" << "|" << "SUCCESS_COUNT" << "|" << "FAIL_COUNT" << endl;
-    out << "Total|" << total_prev << "|" << total_hit_count << "|" << total_success << "|" << total_fail << endl;
+    out << "OPERATION" << "|" << "LOCALITY_COUNT" << "|" << "TOTAL_COUNT" << "|" << "SUCCESS_COUNT" << "|" << "FAIL_COUNT" << "|" << "MISSED_SUCCESS" << endl;
+    out << "Total|" << total_prev << "|" << total_hit_count << "|" << total_success << "|" << total_fail << "|" << total_missed_success << endl;
     for(short i = 0; i < CATEGORIES; i++) {
-      out << INST_CAT_s[i] << "|" << prev_per_category[i] << "|" << hit_per_category[i] << "|" << success_per_category[i] << "|" << fail_per_category[i] << endl;
+      out << INST_CAT_s[i] << "|" << prev_per_category[i] << "|" << hit_per_category[i] << "|" << success_per_category[i] << "|" << fail_per_category[i] << "|" << missed_success_per_category[i] <<endl;
     }
 
     out << endl << "============== VPT SETTINGS ==============" << endl;
     out << "VPT_BITS" << "|" << (UINT32)VPT_BITS << endl;
     out << "VPT_ENTRIES" << "|" << (UINT32)VPT_ENTRIES << endl;
     out << "CT_ENTRIES" << "|" << (UINT32)CT_ENTRIES << endl;
-    out << "CT_BITS" << "|" << (UINT32)CT_BITS << endl;
+    out << "CT_PERF" << "|" << (bool)CT_PERF << endl;
     out << "CT_MAX" << "|" << (UINT32)CT_MAX << endl;
     out << "CT_PRED_TH" << "|" << (UINT32)CT_PRED_TH << endl;
     out << "CT_REP_TH" << "|" << (UINT32)CT_REP_TH << endl;
@@ -431,8 +436,11 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
         cout << "SUCCESS" << endl;
         #endif
         // If it's passed the threshold make prediction
-        if(CT_PERF || ct[ct_index] >= CT_PRED_TH) {
+        if(CT_PERF || (ct[ct_index] >= CT_PRED_TH)) {
           ins_data->pred_success++;
+        }
+        else {
+          ins_data->missed_success++;
         }
         // Increment prediction history
         if(ct[ct_index] < CT_MAX) { ct[ct_index]++; }
@@ -442,7 +450,7 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
         cout << "FAIL" << endl;
         #endif
         // If it's passed the threshold make (wrong) prediction
-        if(!CT_PERF && ct[ct_index] >= CT_PRED_TH) {
+        if(!CT_PERF && (ct[ct_index] >= CT_PRED_TH)) {
           ins_data->pred_failed++;
         }
         // Decrement prediction history
@@ -539,8 +547,8 @@ int main(int argc, char *argv[])
     VPT_ENTRIES = POW(2, VPT_BITS);         // Length of VPT table
     VPT_MASK = VPT_ENTRIES - 1;             // Mask for VPT address table
     UINT8 ct_size = KnobCTSize.Value();     // CT table length, 0 = perfect
-    if (ct_size) { CT_PERF = true; }
-    CT_ENTRIES = POW(2, KnobCTSize.Value()); // Length of CT table
+    if (!ct_size) { CT_PERF = true; }
+    CT_ENTRIES = POW(2, ct_size); // Length of CT table
     CT_MASK = CT_ENTRIES - 1;               // Mask for CT table
     CT_BITS = KnobCTbits.Value();     // Size of prediction in bits
     CT_MAX = POW(2, CT_BITS) - 1;     // Size of prediction
