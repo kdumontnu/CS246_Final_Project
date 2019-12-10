@@ -96,6 +96,9 @@ KNOB<UINT64> KnobCTSize(KNOB_MODE_WRITEONCE,        "pintool",
 KNOB<UINT64> KnobHistDepth(KNOB_MODE_WRITEONCE,        "pintool",
                             "HistDepth", "1", "Value history size");      
 
+KNOB<UINT64> KnobVictimCache(KNOB_MODE_WRITEONCE,        "pintool",
+                            "VictimCache", "0", "Value history size");      
+
 enum RT{freg=1, i8reg=2, i16reg=3, i32reg=4, i64reg=5}; 
 #define IS_FLOAT(type) ((type == freg))
 std::string rt_name[] = {"", "Float Reg", "8 Bit Int", "16 Bit Int", "32 Bit Int", "64 Bit Int"};
@@ -256,6 +259,8 @@ public:
 
 // Declare global Value Prediction Table
 std::map<ADDRINT, VPT_ENTRY*> vpt;
+std::list<VPT_ENTRY*> vpt_viccache;
+
 
 // Declare global Classification Table
 std::map<ADDRINT, UINT8> ct;
@@ -422,14 +427,39 @@ VOID value_predict(ADDRINT ins_ptr, INST_DATA* ins_data , PIN_REGISTER* ref){
     UINT32 ct_index = ins_ptr & CT_MASK;    // Calculate index in VPT
 
 
-    //If there's a collision in the VPT, then evict the old one. 
+    //If there's a collision in the VPT, then evict it!
     if(X_IN_Y(vpt_index, vpt) && ins_ptr != vpt[vpt_index]->tag ){
-        delete vpt[vpt_index];
+        //if the victim cache is full, evict the lru 
+        if(vpt_viccache.size() >= KnobVictimCache.Value()){
+            VPT_ENTRY* to_delete = vpt_viccache.back();
+            delete to_delete;
+            vpt_viccache.pop_back();
+        }
+
+        //insert it into the front of Victim cache 
+        vpt_viccache.push_front(vpt[vpt_index]);
         vpt.erase(vpt_index);
     }
 
+    //first scan the victim cache if we get a hit 
+    bool vic_cache_hit = false; 
+    FOR_X_IN_Y(vc_entry, vpt_viccache){
+
+        //We get a hit!
+        if( (*vc_entry)->tag == ins_ptr){
+            //cout << "Victim cache hit " << ins_ptr  << " Victim cache size " << vpt_viccache.size() <<endl;
+
+            //take victim cache and insert it into VPT 
+            vpt[vpt_index] = (*vc_entry) ; //vpt[vpt_index] is null before this because the above code would have eviccted it.
+            //take it out of the victim cache 
+            vpt_viccache.remove( *vc_entry);
+            vic_cache_hit = true; 
+            break;
+        }
+    }
+
     // Create VPT entry if it doesn't exist
-    if(!X_IN_Y(vpt_index, vpt)){
+    if(!vic_cache_hit &&  !X_IN_Y(vpt_index, vpt)){
       #ifdef PRINTF
       cout << "IP: " << ins_ptr << " --> " << (vpt_index) << endl;
       #endif
