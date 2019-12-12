@@ -2,7 +2,7 @@
 Final project for CS246 - Advanced Computer Architecture
 
 This is a simulation of a Value Prediction Unit (VPU) as introduced in the *Exceeding the Dataflow Limit via Value
-Prediction* [Mikko H. Lipasti et. all, 1996], using [Intel Pin](https://software.intel.com/en-us/articles/pin-a-dynamic-binary-instrumentation-tool)
+Prediction* [Mikko H. Lipasti et. all, 1996], using [Intel Pin Utility](https://software.intel.com/en-us/articles/pin-a-dynamic-binary-instrumentation-tool)
 
 The basic structure includes a Value Prediction Table (VPT), containing the previous write values for each address indexed by the lowest *n* bits of the instruction pointer (PC), and a Classification Table (CT) containing an *y* bit saturating counter that represents the likelihood of a positive prediction, indexed by the lowest *m* bits of PC address
 
@@ -14,7 +14,7 @@ The most recent version of this VPU adds the option to add a Victim Cache to the
 
 ## Installing and Running
 
-install [Intel Pin](https://software.intel.com/en-us/articles/pin-a-dynamic-binary-instrumentation-tool)
+install [Intel Pin Utility](https://software.intel.com/en-us/articles/pin-a-dynamic-binary-instrumentation-tool)
 ```
 make
 pin -t obj-intel64/main.so -outfile results.out -size 10 -- /bin/ls
@@ -49,3 +49,23 @@ F_LOAD_ARITH| Floating Point Load with Arithmetic Instruction (e.g. pminub xmm4,
 F_PURE_ARITH| Floating Point Pure Arithmetic Instruction (e.g. paddd xmm0, xmm6 )
 F_REG_MOVE| Floating Point Register Move Instructions (e.g. movd xmm0, esi )
 UNKNOWN| Anything not classified above
+
+## Results
+
+Full results can be found here: [Report](https://github.com/kdumontnu/CS246_Final_Project/blob/master/CS246%20Final%20Report%20%5BKD%20%26%20DL%5D.pdf)
+
+**Instruction Value Locality**
+
+The following bars indicated the % of cases where the output of an operation was the same as the previous time the operation was executed (i.e. history depth of 1). The dashed line shows the % of instructions seen for each catagory. 
+
+![Value Locality](https://github.com/kdumontnu/CS246_Final_Project/blob/master/img/value_locality_by_inst.PNG "Value Locality by Instruction Type")
+
+We used a simple calculation to model the speedup for an architecture implementing our Value Prediction Unit. The maximum possible speedup under this would be 2x.
+
+![Speedup Calc](https://github.com/kdumontnu/CS246_Final_Project/blob/master/img/speedup_calc.PNG "Speedup Calculation")
+
+![Speedup Results](https://github.com/kdumontnu/CS246_Final_Project/blob/master/img/Speedup.PNG "Speedup Results")
+
+![Speedup Config](https://github.com/kdumontnu/CS246_Final_Project/blob/master/img/speedup_configs.PNG "Speedup Configurations")
+
+
